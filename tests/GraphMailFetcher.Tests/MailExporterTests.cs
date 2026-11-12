@@ -10,13 +10,13 @@ public sealed class MailExporterTests : IDisposable
 
     public void Dispose() => Directory.Delete(_output, recursive: true);
 
-    private MailExporter CreateExporter(string? filter = null)
+    private MailExporter CreateExporter(string? filter = null, ExportFormat format = ExportFormat.Eml)
     {
         var graph = new GraphClient(new HttpClient(_fake), _ => ValueTask.FromResult("token"))
         {
             Delay = (_, _) => Task.CompletedTask,
         };
-        return new MailExporter(graph, _output, filter is null ? null : MailFilter.Parse(filter), TextWriter.Null);
+        return new MailExporter(graph, _output, filter is null ? null : MailFilter.Parse(filter), TextWriter.Null, format);
     }
 
     private static readonly DateTimeOffset Since = new(2026, 11, 11, 0, 0, 0, TimeSpan.Zero);
@@ -84,6 +84,49 @@ public sealed class MailExporterTests : IDisposable
     }
 
     [Fact]
+    public async Task ExportsJsonWithFlattenedAddressesAndAttachments()
+    {
+        var result = await CreateExporter("subject -like 'Invoice*'", ExportFormat.Json)
+            .ExportMailboxAsync("jan@contoso.com", Since, CancellationToken.None);
+
+        Assert.Equal(new ExportResult(Found: 3, Matched: 1, Exported: 1, AlreadyPresent: 0, Failed: 0), result);
+        var file = Assert.Single(Directory.GetFiles(Path.Combine(_output, "jan@contoso.com")));
+        Assert.StartsWith("20261112-091500_Invoice 41_", Path.GetFileName(file));
+        Assert.EndsWith(".json", file);
+
+        var text = await File.ReadAllTextAsync(file);
+        Assert.Contains("<p>Bonjour & héllo</p>", text); // readable, not \u-escaped
+        Assert.DoesNotContain("@odata", text);
+        using var json = System.Text.Json.JsonDocument.Parse(text);
+        var root = json.RootElement;
+        Assert.Equal("m1", root.GetProperty("id").GetString());
+        Assert.Equal("<abc@fabrikam.com>", root.GetProperty("internetMessageId").GetString());
+        Assert.Equal("2026-11-12T09:15:00Z", root.GetProperty("receivedDateTime").GetString());
+        Assert.Equal("billing@fabrikam.com", root.GetProperty("from").GetProperty("address").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("sender").ValueKind);
+        Assert.Equal("Jan", root.GetProperty("toRecipients")[0].GetProperty("name").GetString());
+        Assert.Equal(0, root.GetProperty("ccRecipients").GetArrayLength());
+        Assert.Equal("html", root.GetProperty("body").GetProperty("contentType").GetString());
+        var attachment = root.GetProperty("attachments")[0];
+        Assert.Equal("file", attachment.GetProperty("type").GetString());
+        Assert.Equal("invoice.pdf", attachment.GetProperty("name").GetString());
+        Assert.Equal("JVBERi0=", attachment.GetProperty("contentBytes").GetString());
+    }
+
+    [Fact]
+    public async Task EmlAndJsonExportsAreTrackedSeparately()
+    {
+        await CreateExporter().ExportMailboxAsync("jan@contoso.com", Since, CancellationToken.None);
+
+        var first = await CreateExporter(format: ExportFormat.Json).ExportMailboxAsync("jan@contoso.com", Since, CancellationToken.None);
+        var second = await CreateExporter(format: ExportFormat.Json).ExportMailboxAsync("jan@contoso.com", Since, CancellationToken.None);
+
+        Assert.Equal(3, first.Exported);
+        Assert.Equal(new ExportResult(Found: 3, Matched: 3, Exported: 0, AlreadyPresent: 3, Failed: 0), second);
+        Assert.Equal(6, Directory.GetFiles(Path.Combine(_output, "jan@contoso.com")).Length);
+    }
+
+    [Fact]
     public void SanitizesFileNames()
     {
         Assert.Equal("a b c", MailExporter.SanitizeFileName("a/b\\c", 60));
@@ -111,6 +154,25 @@ public sealed class MailExporterTests : IDisposable
                   "from": { "emailAddress": { "name": "An", "address": "an@contoso.com" } },
                   "toRecipients": [ { "emailAddress": { "name": "Jan", "address": "jan@contoso.com" } } ] },
                 { "id": "d1", "subject": "Unfinished", "receivedDateTime": "2026-11-12T07:00:00Z", "isDraft": true }
+              ]
+            }
+            """;
+
+        private const string Detail = """
+            {
+              "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('jan')/messages/$entity",
+              "@odata.etag": "W/\"x\"",
+              "id": "m1", "internetMessageId": "<abc@fabrikam.com>", "conversationId": "c1", "subject": "Invoice 41",
+              "receivedDateTime": "2026-11-12T09:15:00Z", "sentDateTime": "2026-11-12T09:14:58Z",
+              "importance": "normal", "isRead": true, "hasAttachments": true, "bodyPreview": "Bonjour",
+              "body": { "contentType": "html", "content": "<p>Bonjour & héllo</p>" },
+              "from": { "emailAddress": { "name": "Billing", "address": "billing@fabrikam.com" } },
+              "toRecipients": [ { "emailAddress": { "name": "Jan", "address": "jan@contoso.com" } } ],
+              "ccRecipients": [], "bccRecipients": [], "replyTo": [],
+              "attachments": [
+                { "@odata.type": "#microsoft.graph.fileAttachment", "@odata.mediaContentType": "application/pdf", "id": "a1",
+                  "name": "invoice.pdf", "contentType": "application/pdf", "size": 5, "isInline": false, "contentId": null,
+                  "contentBytes": "JVBERi0=" }
               ]
             }
             """;
@@ -148,6 +210,9 @@ public sealed class MailExporterTests : IDisposable
                 Downloads++;
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($"MIME of {id}") });
             }
+
+            if (url.Contains("$expand=attachments"))
+                return Task.FromResult(Json(HttpStatusCode.OK, Detail));
 
             return Task.FromResult(Json(HttpStatusCode.OK, url.Contains("$skip") ? Page2 : Page1));
         }

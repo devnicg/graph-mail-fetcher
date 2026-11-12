@@ -5,9 +5,11 @@ namespace GraphMailFetcher;
 
 internal sealed record ExportResult(int Found, int Matched, int Exported, int AlreadyPresent, int Failed);
 
-/// <summary>Exports the matching messages of a mailbox as .eml files, skipping the ones that are already there.</summary>
-internal sealed class MailExporter(GraphClient graph, string outputFolder, MailFilter? filter, TextWriter log)
+/// <summary>Exports the matching messages of a mailbox as .eml or .json files, skipping the ones that are already there.</summary>
+internal sealed class MailExporter(GraphClient graph, string outputFolder, MailFilter? filter, TextWriter log, ExportFormat format = ExportFormat.Eml)
 {
+    private readonly string _extension = format == ExportFormat.Json ? ".json" : ".eml";
+
     private const int MaxSubjectLength = 60;
 
     public async Task<ExportResult> ExportMailboxAsync(string mailbox, DateTimeOffset since, CancellationToken ct)
@@ -16,8 +18,9 @@ internal sealed class MailExporter(GraphClient graph, string outputFolder, MailF
         Directory.CreateDirectory(folder);
 
         // Every exported file name ends in a key derived from the message id; those keys tell us what is already there.
+        // Only files of the requested format count, so the same folder can hold both an .eml and a .json export.
         var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var file in Directory.EnumerateFiles(folder, "*.eml"))
+        foreach (var file in Directory.EnumerateFiles(folder, "*" + _extension))
         {
             var name = Path.GetFileNameWithoutExtension(file);
             existing.Add(name[(name.LastIndexOf('_') + 1)..]);
@@ -41,20 +44,25 @@ internal sealed class MailExporter(GraphClient graph, string outputFolder, MailF
                 continue;
             }
 
-            var fileName = $"{message.Received.UtcDateTime:yyyyMMdd-HHmmss}_{SanitizeFileName(message.Subject, MaxSubjectLength)}_{key}.eml";
+            var fileName = $"{message.Received.UtcDateTime:yyyyMMdd-HHmmss}_{SanitizeFileName(message.Subject, MaxSubjectLength)}_{key}{_extension}";
             var path = Path.Combine(folder, fileName);
             var temporary = path + ".partial";
             try
             {
-                // Download to a temporary name first so an interrupted run never leaves a truncated .eml behind.
+                // Download to a temporary name first so an interrupted run never leaves a truncated file behind.
                 await using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
-                    await graph.DownloadMimeAsync(mailbox, message.Id, stream, ct);
+                {
+                    if (format == ExportFormat.Json)
+                        await graph.DownloadJsonAsync(mailbox, message.Id, stream, ct);
+                    else
+                        await graph.DownloadMimeAsync(mailbox, message.Id, stream, ct);
+                }
                 File.Move(temporary, path, overwrite: true);
                 existing.Add(key);
                 exported++;
                 log.WriteLine($"  exported {fileName}");
             }
-            catch (Exception ex) when (ex is GraphException or HttpRequestException or IOException or UnauthorizedAccessException)
+            catch (Exception ex) when (ex is GraphException or HttpRequestException or IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
             {
                 failed++;
                 log.WriteLine($"  FAILED   '{message.Subject}' ({message.Received:u}): {ex.Message}");

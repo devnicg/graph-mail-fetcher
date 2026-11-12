@@ -7,7 +7,8 @@ Microsoft Graph, authenticating as an application with a client certificate.
 
 ```
 graph-mail-fetcher --client-id <guid> --tenant-id <guid|domain> --thumbprint <hex> --output <folder>
-                   [--filter "<expression>"] [--lookback <period>] [--mailbox <address>[,<address>...]]
+                   --mailbox <upn|object-id>[,...] [--filter "<expression>"] [--lookback <period>]
+                   [--format eml|json]
 ```
 
 | Option | Required | Description |
@@ -16,16 +17,17 @@ graph-mail-fetcher --client-id <guid> --tenant-id <guid|domain> --thumbprint <he
 | `--tenant-id` | yes | Directory (tenant) id or tenant domain. |
 | `--thumbprint` | yes | Thumbprint of the client certificate in the current user's certificate store (`CurrentUser\My`). It must have a private key. |
 | `--output` | yes | Destination folder: a local path or a UNC path (`\\server\share\mail`). Created if missing. |
+| `--mailbox` | yes | Mailbox to export: user principal name (`jan@contoso.com`) or object id (GUID). Repeat or comma-separate for several mailboxes. |
 | `--filter` | no | PowerShell-like filter, see below. |
 | `--lookback` | no | How far back to go, today included: `<n>d`, `<n>w`, `<n>mo`, `<n>y`. Default `2d` (today and yesterday). |
-| `--mailbox` | no | Mailbox(es) to export (UPN, address or object id); repeat or comma-separate. Default: every mailbox in the tenant. |
+| `--format` | no | `eml` (default) or `json`, see below. |
 
-Options can also be written PowerShell-style (`-ClientId`, `-TenantId`, `-Thumbprint`, `-Output`, `-Filter`,
-`-Lookback`, `-Mailbox`) or as `--name=value`.
+Options can also be written PowerShell-style (`-ClientId`, `-TenantId`, `-Thumbprint`, `-Output`, `-Mailbox`,
+`-Filter`, `-Lookback`, `-Format`) or as `--name=value`.
 
 ```powershell
 graph-mail-fetcher --client-id 00000000-0000-0000-0000-000000000000 --tenant-id contoso.onmicrosoft.com `
-  --thumbprint 1A2B3C... --output \\fileserver\archive\mail --lookback 1mo `
+  --thumbprint 1A2B3C... --output \\fileserver\archive\mail --mailbox jan@contoso.com --lookback 1mo `
   --filter "subject -like '*invoice*' -and sender -like '*@fabrikam.com'"
 ```
 
@@ -57,21 +59,65 @@ month/year.
 
 ## Output and duplicates
 
-Mails are written to `<output>\<mailbox>\<yyyyMMdd-HHmmss>_<subject>_<key>.eml` (received time in UTC). The key
-is derived from the message's immutable Graph id; a message whose key is already present in the mailbox folder
-is not downloaded again, so the tool can be scheduled repeatedly against the same destination. Renaming the
-date/subject part of a file is fine as long as the `_<key>.eml` ending stays.
+Mails are written to `<output>\<mailbox>\<yyyyMMdd-HHmmss>_<subject>_<key>.eml` (or `.json`; received time in
+UTC). The key is derived from the message's immutable Graph id; a message whose key is already present in the
+mailbox folder is not downloaded again, so the tool can be scheduled repeatedly against the same destination.
+Renaming the date/subject part of a file is fine as long as the `_<key>.eml` / `_<key>.json` ending stays.
+The two formats are tracked separately, so an existing `.eml` does not stop the `.json` of the same mail from
+being exported.
 
 All folders of the mailbox are searched (including Sent Items and Deleted Items); drafts are skipped.
+
+## JSON format
+
+`--format json` writes one UTF-8 JSON file per mail, readable with any JSON parser
+(`Get-Content file.json -Raw | ConvertFrom-Json`). Every file has the same properties; missing values are `null`.
+
+```json
+{
+  "id": "AAkALg...",
+  "internetMessageId": "<abc@fabrikam.com>",
+  "conversationId": "AAQkAD...",
+  "subject": "Invoice 41",
+  "receivedDateTime": "2026-11-12T09:15:00Z",
+  "sentDateTime": "2026-11-12T09:14:58Z",
+  "from": { "name": "Billing", "address": "billing@fabrikam.com" },
+  "sender": { "name": "Billing", "address": "billing@fabrikam.com" },
+  "toRecipients": [ { "name": "Jan", "address": "jan@contoso.com" } ],
+  "ccRecipients": [],
+  "bccRecipients": [],
+  "replyTo": [],
+  "importance": "normal",
+  "isRead": true,
+  "hasAttachments": true,
+  "bodyPreview": "Please find the invoice attached...",
+  "body": { "contentType": "html", "content": "<html>...</html>" },
+  "attachments": [
+    { "type": "file", "name": "invoice.pdf", "contentType": "application/pdf", "size": 48213,
+      "isInline": false, "contentId": null, "contentBytes": "JVBERi0xLjcK..." }
+  ]
+}
+```
+
+- Dates are UTC in ISO 8601. `body.contentType` is `html` or `text`, as the mail was stored; `bodyPreview` is
+  the first 255 characters as plain text.
+- `attachments[].type` is `file` (content in `contentBytes`, base64), `item` (an attached mail, event or
+  contact) or `reference` (a link to a cloud file). Only `file` attachments carry `contentBytes`; for the
+  others it is `null`.
 
 ## App registration
 
 Application permissions (admin consent required):
 
 - `Mail.Read`
-- `User.Read.All` — only when `--mailbox` is omitted, to enumerate the tenant's mailboxes
 
 Upload the certificate's public key (`.cer`) under *Certificates & secrets* of the app registration.
+
+## Releases
+
+The version lives in `<Version>` in `src/GraphMailFetcher/GraphMailFetcher.csproj`. When a commit on `main` carries a
+version that has no `v<version>` tag yet, the *Release* workflow runs the tests and publishes a GitHub release
+with self-contained single-file builds for `win-x64` and `linux-x64` (no .NET installation needed).
 
 ## Build
 

@@ -23,18 +23,6 @@ internal sealed class GraphClient(HttpClient http, Func<CancellationToken, Value
     /// <summary>Lets tests skip the back-off delays.</summary>
     public Func<TimeSpan, CancellationToken, Task> Delay { get; init; } = Task.Delay;
 
-    /// <summary>Lists the user principal names of all users that have a mail address.</summary>
-    public async IAsyncEnumerable<string> ListMailboxesAsync([EnumeratorCancellation] CancellationToken ct)
-    {
-        var url = $"{BaseUrl}/users?$select=userPrincipalName,mail&$top=999";
-        await foreach (var user in GetPagedAsync(url, null, ct))
-        {
-            if (user.TryGetProperty("mail", out var mail) && mail.ValueKind == JsonValueKind.String
-                && user.TryGetProperty("userPrincipalName", out var upn) && upn.ValueKind == JsonValueKind.String)
-                yield return upn.GetString()!;
-        }
-    }
-
     /// <summary>Lists the messages in all folders of a mailbox received at or after <paramref name="since"/>.</summary>
     public async IAsyncEnumerable<MailMessage> ListMessagesAsync(
         string mailbox, DateTimeOffset since, bool includeBody, [EnumeratorCancellation] CancellationToken ct)
@@ -86,6 +74,18 @@ internal sealed class GraphClient(HttpClient http, Func<CancellationToken, Value
         using var response = await SendAsync(url, "IdType=\"ImmutableId\"", ct);
         await using var content = await response.Content.ReadAsStreamAsync(ct);
         await content.CopyToAsync(destination, ct);
+    }
+
+    /// <summary>Downloads a message with its attachments and writes it as JSON into <paramref name="destination"/>.</summary>
+    public async Task DownloadJsonAsync(string mailbox, string messageId, Stream destination, CancellationToken ct)
+    {
+        var url = $"{BaseUrl}/users/{Uri.EscapeDataString(mailbox)}/messages/{Uri.EscapeDataString(messageId)}"
+            + "?$select=id,internetMessageId,conversationId,subject,receivedDateTime,sentDateTime,from,sender,toRecipients,"
+            + "ccRecipients,bccRecipients,replyTo,importance,isRead,hasAttachments,bodyPreview,body&$expand=attachments";
+        using var response = await SendAsync(url, "IdType=\"ImmutableId\"", ct);
+        await using var content = await response.Content.ReadAsStreamAsync(ct);
+        using var document = await JsonDocument.ParseAsync(content, cancellationToken: ct);
+        await MessageJson.WriteAsync(document.RootElement, destination, ct);
     }
 
     private static string? GetString(JsonElement element, string property) =>

@@ -54,21 +54,12 @@ static async Task<int> RunAsync(string[] args, CancellationToken ct)
     // The credential caches the token and renews it shortly before it expires.
     var graph = new GraphClient(http, async token => (await credential.GetTokenAsync(tokenRequest, token)).Token);
 
-    Console.WriteLine($"Exporting mail received since {since.ToLocalTime():yyyy-MM-dd HH:mm} to {outputFolder}");
+    Console.WriteLine($"Exporting mail received since {since.ToLocalTime():yyyy-MM-dd HH:mm} to {outputFolder} as {options.Format.ToString().ToLowerInvariant()}");
 
-    var mailboxes = options.Mailboxes.ToList();
-    var explicitMailboxes = mailboxes.Count > 0;
-    if (!explicitMailboxes)
-    {
-        await foreach (var mailbox in graph.ListMailboxesAsync(ct))
-            mailboxes.Add(mailbox);
-        Console.WriteLine($"No --mailbox given: found {mailboxes.Count} user(s) with a mail address in the tenant.");
-    }
-
-    var exporter = new MailExporter(graph, outputFolder, filter, Console.Out);
+    var exporter = new MailExporter(graph, outputFolder, filter, Console.Out, options.Format);
     int exported = 0, alreadyPresent = 0, failed = 0, failedMailboxes = 0;
 
-    foreach (var mailbox in mailboxes)
+    foreach (var mailbox in options.Mailboxes)
     {
         Console.WriteLine($"{mailbox}:");
         try
@@ -79,12 +70,6 @@ static async Task<int> RunAsync(string[] args, CancellationToken ct)
             exported += result.Exported;
             alreadyPresent += result.AlreadyPresent;
             failed += result.Failed;
-        }
-        catch (GraphException ex) when (!explicitMailboxes
-            && ex.Code is "MailboxNotEnabledForRESTAPI" or "MailboxNotSupportedForRESTAPI" or "ErrorMailboxNotEnabled" or "ResourceNotFound")
-        {
-            // Tenant-wide runs meet accounts without an Exchange Online mailbox; those are not errors.
-            Console.WriteLine("  skipped: no Exchange Online mailbox");
         }
         catch (Exception ex) when (ex is GraphException or HttpRequestException or IOException or UnauthorizedAccessException)
         {

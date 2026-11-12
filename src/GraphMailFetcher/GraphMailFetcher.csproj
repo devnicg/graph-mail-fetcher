@@ -8,6 +8,8 @@
     <AssemblyName>graph-mail-fetcher</AssemblyName>
     <RootNamespace>GraphMailFetcher</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Bump on every change; the Release workflow publishes a GitHub release for each new version. -->
+    <Version>1.1.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
