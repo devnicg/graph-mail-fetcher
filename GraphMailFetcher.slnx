@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/GraphMailFetcher/GraphMailFetcher.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/GraphMailFetcher.Tests/GraphMailFetcher.Tests.csproj" />
+  </Folder>
+</Solution>
